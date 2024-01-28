@@ -13,6 +13,9 @@ pub fn init() {
     GLOBAL_SCHEDULER.call_once(|| SpinLock::new(GlobalScheduler { scheduler: None }));
 }
 
+/// The number of `Task`s.
+pub type TaskNumber = u32;
+
 /// A scheduler for tasks.
 ///
 /// Operations on the scheduler should be performed with interrupts disabled,
@@ -58,6 +61,11 @@ pub trait Scheduler<T: NeedResched + ReadPriority = Task>: Sync + Send {
 
     /// Yield the current task to the target task at best effort.
     fn yield_to(&self, cur_task: &Arc<T>, target_task: Arc<T>);
+
+    fn contains(&self, task: &Arc<T>) -> bool;
+
+    #[cfg(any(test, ktest))]
+    fn task_num(&self) -> TaskNumber;
 }
 
 pub struct GlobalScheduler {

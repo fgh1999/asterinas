@@ -88,4 +88,21 @@ impl Scheduler for PreemptiveRRScheduler {
         self.before_yield(cur_task);
         self.enqueue_at(target_task, true);
     }
+
+    fn contains(&self, task: &Arc<Task>) -> bool {
+        let target = &mut if task.is_real_time() {
+            self.real_time_tasks.lock()
+        } else {
+            self.normal_tasks.lock()
+        };
+
+        let cursor = &mut target.cursor_mut();
+        while let Some(t) = cursor.get() {
+            if t == task.as_ref() {
+                return true;
+            }
+            cursor.move_next();
+        }
+        false
+    }
 }
