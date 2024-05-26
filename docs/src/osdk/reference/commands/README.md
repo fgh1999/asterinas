@@ -12,6 +12,7 @@ Currently, OSDK supports the following commands:
 - **test**: Execute kernel mode unit test by starting a VMM
 - **check**: Analyze the current package and report errors
 - **clippy**: Check the current package and catch common mistakes
+- **debug**: Debug a remote target via GDB
 
 The **new**, **build**, **run** and **test** commands
 can accept additional options,

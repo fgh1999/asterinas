@@ -17,7 +17,9 @@ touch Cargo.toml
 
 Then, add the following content to `Cargo.toml`:
 
+```toml
 {{#include ../../../../osdk/tests/examples_in_book/work_in_workspace_templates/Cargo.toml}}
+```
 
 ## Creating a kernel project and a library project
 
@@ -56,17 +58,23 @@ Next, add the following function to `mymodule/src/lib.rs`.
 This function will calculate the available memory
 after booting:
 
+```rust
 {{#include ../../../../osdk/tests/examples_in_book/work_in_workspace_templates/mymodule/src/lib.rs}}
+```
 
 Then, add a dependency on `mymodule` to `myos/Cargo.toml`:
 
+```toml
 {{#include ../../../../osdk/tests/examples_in_book/work_in_workspace_templates/myos/Cargo.toml}}
+```
 
 In `myos/src/lib.rs`,
 modify the file content as follows.
 This main function will call the function from `mymodule`:
 
+```rust
 {{#include ../../../../osdk/tests/examples_in_book/work_in_workspace_templates/myos/src/lib.rs}}
+```
 
 ## Building and Running the kernel
 
