@@ -2,13 +2,21 @@
 
 #![allow(unused_variables)]
 
-use core::marker::PhantomData;
+use core::{any::TypeId, marker::PhantomData};
 
 use align_ext::AlignExt;
 use inherit_methods_macro::inherit_methods;
 use pod::Pod;
 
-use crate::prelude::*;
+use crate::{
+    arch::x86::mm::copy_with_recovery,
+    mm::{
+        kspace::{KERNEL_BASE_VADDR, KERNEL_END_VADDR},
+        MAX_USERSPACE_VADDR,
+    },
+    prelude::*,
+    Error,
+};
 
 /// A trait that enables reading/writing data from/to a VM object,
 /// e.g., [`VmSpace`], [`FrameVec`], and [`Frame`].
@@ -168,28 +176,126 @@ impl_vmio_pointer!(&mut T, "(**self)");
 impl_vmio_pointer!(Box<T>, "(**self)");
 impl_vmio_pointer!(Arc<T>, "(**self)");
 
-/// VmReader is a reader for reading data from a contiguous range of memory.
-pub struct VmReader<'a> {
-    cursor: *const u8,
-    end: *const u8,
-    phantom: PhantomData<&'a [u8]>,
+/// A marker structure used for [`VmReader`] and [`VmWriter`],
+/// representing their operated memory scope is in user space.
+pub struct UserSpace;
+
+/// A marker structure used for [`VmReader`] and [`VmWriter`],
+/// representing their operated memory scope is in kernel space.
+pub struct KernelSpace;
+
+/// Copies `len` bytes from `src` to `dst`.
+/// Moves `src` and `dst` to the end of copied range.
+///
+/// Returns the number of successfully copied bytes.
+///
+/// # Safety
+///
+/// The region of memory [`src`..`src` + len] and [`dst`..`dst` + len] must be valid,
+/// and should _not_ overlap if one of them represent typed memory.
+///
+/// Operation on typed memory may be safe only if it is plain-old-data. Otherwise
+/// the safety requirements of [`core::ptr::copy`] should also be considered.
+unsafe fn copy_valid_ensured(src: &mut *const u8, dst: &mut *mut u8, len: usize) -> usize {
+    core::ptr::copy(*src, *dst, len);
+    *src = src.add(len);
+    *dst = dst.add(len);
+
+    len
 }
 
-impl<'a> VmReader<'a> {
-    /// Constructs a VmReader from a pointer and a length.
+/// Copies `len` bytes from `src` to `dst`.
+/// Moves `src` and `dst` to the end of copied range.
+/// This function will early stop copying if encountering an unresolvable page fault.
+///
+/// Returns the number of successfully copied bytes.
+///
+/// # Safety
+///
+/// This method should only be used when one of [`src`..`src` + len] and [`dst`..`dst` + len]
+/// is in user space, and the other memory is in kernel space and is ensured to be valid.
+/// In addition, users should ensure this function only be invoked when a suitable page table
+/// is activated.
+///
+/// The actual physical address of memory [`src`..`src` + len] and [`dst`..`dst` + len] should
+/// _not_ overlap if the kernel space memory represent typed memory.
+unsafe fn copy_valid_unchecked(src: &mut *const u8, dst: &mut *mut u8, len: usize) -> usize {
+    let failed_bytes = copy_with_recovery(*dst, *src, len);
+    let copied_len = len - failed_bytes;
+    *src = src.add(copied_len);
+    *dst = dst.add(copied_len);
+
+    copied_len
+}
+
+/// `VmReader` is a reader for reading data from a contiguous range of memory.
+///
+/// The memory range read by `VmReader` can be in either kernel space or user space.
+/// When the operating range is in kernel space, the memory within that range
+/// is guaranteed to be valid.
+/// When the operating range is in user space, it is ensured that the page table of
+/// the process creating the `VmReader` is active for the duration of `'a`.
+///
+/// When perform reading with a `VmWriter`, if one of them represents typed memory,
+/// it can ensure that the reading range in this reader and writing range in the
+/// writer are not overlapped.
+///
+/// NOTE: The overlap mentioned above is at both the virtual address level
+/// and physical address level. There is not guarantee for the operation results
+/// of `VmReader` and `VmWriter` in overlapping untyped addresses, and it is
+/// the user's responsibility to handle this situation.
+pub struct VmReader<'a, Target: 'static = KernelSpace> {
+    cursor: *const u8,
+    end: *const u8,
+    phantom: PhantomData<(&'a [u8], Target)>,
+}
+
+impl<'a> VmReader<'a, KernelSpace> {
+    /// Constructs a `VmReader` from a pointer and a length, which represents
+    /// a memory range in kernel space.
     ///
     /// # Safety
     ///
-    /// User must ensure the memory from `ptr` to `ptr.add(len)` is contiguous.
-    /// User must ensure the memory is valid during the entire period of `'a`.
-    pub const unsafe fn from_raw_parts(ptr: *const u8, len: usize) -> Self {
+    /// Users must ensure the memory from `ptr` to `ptr.add(len)` is contiguous.
+    /// Users must ensure the memory is valid during the entire period of `'a`.
+    /// Users must ensure the memory should _not_ overlap with other `VmWriter`s
+    /// with typed memory, and if the memory range in this `VmReader` is typed,
+    /// it should _not_ overlap with other `VmWriter`s.
+    ///
+    /// The user space memory is treated as untyped.
+    pub unsafe fn from_kernel_space(ptr: *const u8, len: usize) -> Self {
+        debug_assert!(KERNEL_BASE_VADDR <= ptr as usize);
+        debug_assert!(ptr.add(len) as usize <= KERNEL_END_VADDR);
+
         Self {
             cursor: ptr,
             end: ptr.add(len),
             phantom: PhantomData,
         }
     }
+}
 
+impl<'a> VmReader<'a, UserSpace> {
+    /// Constructs a `VmReader` from a pointer and a length, which represents
+    /// a memory range in kernel space.
+    ///
+    /// # Safety
+    ///
+    /// Users must ensure the memory from `ptr` to `ptr.add(len)` is contiguous.
+    /// Users must ensure that the page table for the process in which this constructor is called
+    /// are active during the entire period of `'a`.
+    pub unsafe fn from_user_space(ptr: *const u8, len: usize) -> Self {
+        debug_assert!((ptr as usize).checked_add(len).unwrap_or(usize::MAX) <= MAX_USERSPACE_VADDR);
+
+        Self {
+            cursor: ptr,
+            end: ptr.add(len),
+            phantom: PhantomData,
+        }
+    }
+}
+
+impl<'a, Target: 'static> VmReader<'a, Target> {
     /// Returns the number of bytes for the remaining data.
     pub const fn remain(&self) -> usize {
         // SAFETY: the end is equal to or greater than the cursor.
@@ -208,7 +314,7 @@ impl<'a> VmReader<'a> {
 
     /// Limits the length of remaining data.
     ///
-    /// This method ensures the postcondition of `self.remain() <= max_remain`.
+    /// This method ensures the post condition of `self.remain() <= max_remain`.
     pub const fn limit(mut self, max_remain: usize) -> Self {
         if max_remain < self.remain() {
             // SAFETY: the new end is less than the old end.
@@ -231,138 +337,177 @@ impl<'a> VmReader<'a> {
         self
     }
 
-    /// Reads all data into the writer until one of the two conditions is met:
+    /// Reads data from this reader into the writer until one of the three conditions is met:
     /// 1. The reader has no remaining data.
     /// 2. The writer has no available space.
+    /// 3. The reading encounters a page fault that cannot be handled.
     ///
     /// Returns the number of bytes read.
     ///
     /// It pulls the number of bytes data from the reader and
     /// fills in the writer with the number of bytes.
-    pub fn read(&mut self, writer: &mut VmWriter<'_>) -> usize {
+    ///
+    /// The reading instruction is forbidden if the targets of reader and writer
+    /// are both user space.
+    pub fn read<W: 'static>(&mut self, writer: &mut VmWriter<'_, W>) -> usize {
         let copy_len = self.remain().min(writer.avail());
         if copy_len == 0 {
             return 0;
         }
 
-        // SAFETY: the memory range is valid since `copy_len` is the minimum
-        // of the reader's remaining data and the writer's available space.
-        unsafe {
-            core::ptr::copy(self.cursor, writer.cursor, copy_len);
-            self.cursor = self.cursor.add(copy_len);
-            writer.cursor = writer.cursor.add(copy_len);
+        if TypeId::of::<Target>() == TypeId::of::<UserSpace>()
+            && TypeId::of::<W>() == TypeId::of::<UserSpace>()
+        {
+            // The target of this reader and the input writer are both user space.
+            panic!("copy from user to user is forbidden");
+        } else if TypeId::of::<Target>() == TypeId::of::<UserSpace>()
+            || TypeId::of::<W>() == TypeId::of::<UserSpace>()
+        {
+            // One of the target is user space and the other is kernel space.
+            //
+            // SAFETY: The the corresponding page table of the user space memory is
+            // guaranteed to be activated due to its construction requirement.
+            // The kernel space memory range will be valid since `copy_len` is the minimum
+            // of the reader's remaining data and the writer's available space, and will
+            // not overlap with user space memory range in physical address level if it
+            // represents typed memory.
+            unsafe { copy_valid_unchecked(&mut self.cursor, &mut writer.cursor, copy_len) }
+        } else {
+            // The target of this reader and the input writer are both kernel space.
+            //
+            // SAFETY: the reading memory range and writing memory range will be valid
+            // since `copy_len` is the minimum of the reader's remaining data and the
+            // writer's available space, and will not overlap if one of them represents
+            // typed memory.
+            unsafe { copy_valid_ensured(&mut self.cursor, &mut writer.cursor, copy_len) }
         }
-        copy_len
     }
 
-    /// Read a value of `Pod` type.
+    /// Reads all data from this reader into the writer until one of the three conditions is met:
+    /// 1. The reader has no remaining data.
+    /// 2. The writer has no available space.
+    /// 3. The reading encounters a page fault that cannot be handled.
     ///
-    /// # Panic
+    /// It pulls the number of bytes data from the reader and
+    /// fills in the writer with the number of bytes.
     ///
-    /// If the length of the `Pod` type exceeds `self.remain()`, then this method will panic.
-    pub fn read_val<T: Pod>(&mut self) -> T {
-        assert!(self.remain() >= core::mem::size_of::<T>());
+    /// If the reading stops due to the condition 1 or 2, this method is considered successful
+    /// and returns the number of bytes read.
+    /// If the reading stops due to the condition 3, which means the reader have remaining data
+    /// and the writer also has available space, the reading is considered failed and return `Err`.
+    ///
+    /// The reading instruction is forbidden if the targets of reader and writer
+    /// are both user space.
+    pub fn read_all<W: 'static>(&mut self, writer: &mut VmWriter<'_, W>) -> Result<usize> {
+        let copy_len = self.remain().min(writer.avail());
+        if copy_len == 0 {
+            return Ok(0);
+        }
+
+        if TypeId::of::<Target>() == TypeId::of::<UserSpace>()
+            && TypeId::of::<W>() == TypeId::of::<UserSpace>()
+        {
+            // The target of this reader and the input writer are both user space.
+            panic!("copy from user to user is forbidden");
+        } else if TypeId::of::<Target>() == TypeId::of::<UserSpace>()
+            || TypeId::of::<W>() == TypeId::of::<UserSpace>()
+        {
+            // One of the target is user space and the other is kernel space.
+            //
+            // SAFETY:
+            // Meets the same safety requirements as `VmReader::read`.
+            let copied_len =
+                unsafe { copy_valid_unchecked(&mut self.cursor, &mut writer.cursor, copy_len) };
+            if copied_len < copy_len {
+                Err(Error::PageFault)
+            } else {
+                Ok(copied_len)
+            }
+        } else {
+            // The target of this reader and the input writer are both kernel space.
+            //
+            // SAFETY:
+            // Meets the same safety requirements as `VmReader::read`.
+            unsafe {
+                Ok(copy_valid_ensured(
+                    &mut self.cursor,
+                    &mut writer.cursor,
+                    copy_len,
+                ))
+            }
+        }
+    }
+
+    /// Reads a value of `Pod` type.
+    ///
+    /// If the length of the `Pod` type exceeds `self.remain()`,
+    /// or the value can not be read completely,
+    /// this method will return `Err`.
+    pub fn read_val<T: Pod>(&mut self) -> Result<T> {
+        if self.remain() < core::mem::size_of::<T>() {
+            return Err(Error::PageFault);
+        }
 
         let mut val = T::new_uninit();
         let mut writer = VmWriter::from(val.as_bytes_mut());
-        let read_len = self.read(&mut writer);
-
-        val
+        self.read_all(&mut writer).map(|_| val)
     }
 }
 
 impl<'a> From<&'a [u8]> for VmReader<'a> {
     fn from(slice: &'a [u8]) -> Self {
-        // SAFETY: the range of memory is contiguous and is valid during `'a`.
-        unsafe { Self::from_raw_parts(slice.as_ptr(), slice.len()) }
+        // SAFETY: the range of memory is contiguous and is valid during `'a`,
+        // and will not overlap with other `VmWriter` since the slice already has
+        // an immutable reference. The slice will not be mapped to the user space hence
+        // it will also not overlap with `VmWriter` generated from user space.
+        unsafe { Self::from_kernel_space(slice.as_ptr(), slice.len()) }
     }
 }
 
-/// VmWriter is a writer for writing data to a contiguous range of memory.
-pub struct VmWriter<'a> {
+/// `VmWriter` is a writer for writing data to a contiguous range of memory.
+///
+/// The memory range write by `VmWriter` can be in either kernel space or user space.
+/// When the operating range is in kernel space, the memory within that range
+/// is guaranteed to be valid.
+/// When the operating range is in user space, it is ensured that the page table of
+/// the process creating the `VmWriter` is active for the duration of `'a`.
+///
+/// When perform writing with a `VmReader`, if one of them represents typed memory,
+/// it can ensure that the writing range in this writer and reading range in the
+/// reader are not overlapped.
+///
+/// NOTE: The overlap mentioned above is at both the virtual address level
+/// and physical address level. There is not guarantee for the operation results
+/// of `VmReader` and `VmWriter` in overlapping untyped addresses, and it is
+/// the user's responsibility to handle this situation.
+pub struct VmWriter<'a, Target: 'static = KernelSpace> {
     cursor: *mut u8,
     end: *mut u8,
-    phantom: PhantomData<&'a mut [u8]>,
+    phantom: PhantomData<(&'a mut [u8], Target)>,
 }
 
-impl<'a> VmWriter<'a> {
-    /// Constructs a VmWriter from a pointer and a length.
+impl<'a> VmWriter<'a, KernelSpace> {
+    /// Constructs a `VmWriter` from a pointer and a length, which represents
+    /// a memory range in kernel space.
     ///
     /// # Safety
     ///
-    /// User must ensure the memory from `ptr` to `ptr.add(len)` is contiguous.
-    /// User must ensure the memory is valid during the entire period of `'a`.
-    pub const unsafe fn from_raw_parts_mut(ptr: *mut u8, len: usize) -> Self {
+    /// Users must ensure the memory from `ptr` to `ptr.add(len)` is contiguous.
+    /// Users must ensure the memory is valid during the entire period of `'a`.
+    /// Users must ensure the memory should _not_ overlap with other `VmReader`s
+    /// with typed memory, and if the memory range in this `VmReader` is typed,
+    /// it should _not_ overlap with other `VmReader`s.
+    ///
+    /// The user space memory is treated as untyped.
+    pub unsafe fn from_kernel_space(ptr: *mut u8, len: usize) -> Self {
+        debug_assert!(KERNEL_BASE_VADDR <= ptr as usize);
+        debug_assert!(ptr.add(len) as usize <= KERNEL_END_VADDR);
+
         Self {
             cursor: ptr,
             end: ptr.add(len),
             phantom: PhantomData,
         }
-    }
-
-    /// Returns the number of bytes for the available space.
-    pub const fn avail(&self) -> usize {
-        // SAFETY: the end is equal to or greater than the cursor.
-        unsafe { self.end.sub_ptr(self.cursor) }
-    }
-
-    /// Returns the cursor pointer, which refers to the address of the next byte to write.
-    pub const fn cursor(&self) -> *mut u8 {
-        self.cursor
-    }
-
-    /// Returns if it has avaliable space to write.
-    pub const fn has_avail(&self) -> bool {
-        self.avail() > 0
-    }
-
-    /// Limits the length of available space.
-    ///
-    /// This method ensures the postcondition of `self.avail() <= max_avail`.
-    pub const fn limit(mut self, max_avail: usize) -> Self {
-        if max_avail < self.avail() {
-            // SAFETY: the new end is less than the old end.
-            unsafe { self.end = self.cursor.add(max_avail) };
-        }
-        self
-    }
-
-    /// Skips the first `nbytes` bytes of data.
-    /// The length of available space is decreased accordingly.
-    ///
-    /// # Panic
-    ///
-    /// If `nbytes` is greater than `self.avail()`, then the method panics.
-    pub fn skip(mut self, nbytes: usize) -> Self {
-        assert!(nbytes <= self.avail());
-
-        // SAFETY: the new cursor is less than or equal to the end.
-        unsafe { self.cursor = self.cursor.add(nbytes) };
-        self
-    }
-
-    /// Writes data from the reader until one of the two conditions is met:
-    /// 1. The writer has no available space.
-    /// 2. The reader has no remaining data.
-    ///
-    /// Returns the number of bytes written.
-    ///
-    /// It pulls the number of bytes data from the reader and
-    /// fills in the writer with the number of bytes.
-    pub fn write(&mut self, reader: &mut VmReader<'_>) -> usize {
-        let copy_len = self.avail().min(reader.remain());
-        if copy_len == 0 {
-            return 0;
-        }
-
-        // SAFETY: the memory range is valid since `copy_len` is the minimum
-        // of the reader's remaining data and the writer's available space.
-        unsafe {
-            core::ptr::copy(reader.cursor, self.cursor, copy_len);
-            self.cursor = self.cursor.add(copy_len);
-            reader.cursor = reader.cursor.add(copy_len);
-        }
-        copy_len
     }
 
     /// Fills the available space by repeating `value`.
@@ -396,9 +541,192 @@ impl<'a> VmWriter<'a> {
     }
 }
 
+impl<'a> VmWriter<'a, UserSpace> {
+    /// Constructs a `VmWriter` from a pointer and a length, which represents
+    /// a memory range in kernel space.
+    ///
+    /// # Safety
+    ///
+    /// Users must ensure the memory from `ptr` to `ptr.add(len)` is contiguous.
+    /// Users must ensure that the page table for the process in which this constructor is called
+    /// are active during the entire period of `'a`.
+    pub unsafe fn from_user_space(ptr: *mut u8, len: usize) -> Self {
+        debug_assert!((ptr as usize).checked_add(len).unwrap_or(usize::MAX) <= MAX_USERSPACE_VADDR);
+
+        Self {
+            cursor: ptr,
+            end: ptr.add(len),
+            phantom: PhantomData,
+        }
+    }
+}
+
+impl<'a, Target: 'static> VmWriter<'a, Target> {
+    /// Returns the number of bytes for the available space.
+    pub const fn avail(&self) -> usize {
+        // SAFETY: the end is equal to or greater than the cursor.
+        unsafe { self.end.sub_ptr(self.cursor) }
+    }
+
+    /// Returns the cursor pointer, which refers to the address of the next byte to write.
+    pub const fn cursor(&self) -> *mut u8 {
+        self.cursor
+    }
+
+    /// Returns if it has available space to write.
+    pub const fn has_avail(&self) -> bool {
+        self.avail() > 0
+    }
+
+    /// Limits the length of available space.
+    ///
+    /// This method ensures the post condition of `self.avail() <= max_avail`.
+    pub const fn limit(mut self, max_avail: usize) -> Self {
+        if max_avail < self.avail() {
+            // SAFETY: the new end is less than the old end.
+            unsafe { self.end = self.cursor.add(max_avail) };
+        }
+        self
+    }
+
+    /// Skips the first `nbytes` bytes of data.
+    /// The length of available space is decreased accordingly.
+    ///
+    /// # Panic
+    ///
+    /// If `nbytes` is greater than `self.avail()`, then the method panics.
+    pub fn skip(mut self, nbytes: usize) -> Self {
+        assert!(nbytes <= self.avail());
+
+        // SAFETY: the new cursor is less than or equal to the end.
+        unsafe { self.cursor = self.cursor.add(nbytes) };
+        self
+    }
+
+    /// Writes data from the reader into this writer until one of the three conditions is met:
+    /// 1. The writer has no available space.
+    /// 2. The reader has no remaining data.
+    /// 3. The writing encounters a page fault that cannot be handled.
+    ///
+    /// Returns the number of bytes written.
+    ///
+    /// It pulls the number of bytes data from the reader and
+    /// fills in the writer with the number of bytes.
+    ///
+    /// The writing instruction is forbidden if the targets of reader and writer
+    /// are both user space.
+    pub fn write<R: 'static>(&mut self, reader: &mut VmReader<'_, R>) -> usize {
+        let copy_len = self.avail().min(reader.remain());
+        if copy_len == 0 {
+            return 0;
+        }
+
+        if TypeId::of::<Target>() == TypeId::of::<UserSpace>()
+            && TypeId::of::<R>() == TypeId::of::<UserSpace>()
+        {
+            // The target of this writer and the input reader are both user space.
+            panic!("copy from user to user is forbidden");
+        } else if TypeId::of::<Target>() == TypeId::of::<UserSpace>()
+            || TypeId::of::<R>() == TypeId::of::<UserSpace>()
+        {
+            // One of the target is user space and the other is kernel space.
+            //
+            // SAFETY: The the corresponding page table of the user space memory is
+            // guaranteed to be activated due to its construction requirement.
+            // The kernel space memory range will be valid since `copy_len` is the minimum
+            // of the reader's remaining data and the writer's available space, and will
+            // not overlap with user space memory range in physical address level if it
+            // represents typed memory.
+            unsafe { copy_valid_unchecked(&mut reader.cursor, &mut self.cursor, copy_len) }
+        } else {
+            // The target of this writer and the input reader are both kernel space.
+            //
+            // SAFETY: the reading memory range and writing memory range will be valid
+            // since `copy_len` is the minimum of the reader's remaining data and the
+            // writer's available space, and will not overlap if one of them represents
+            // typed memory.
+            unsafe { copy_valid_ensured(&mut reader.cursor, &mut self.cursor, copy_len) }
+        }
+    }
+
+    /// Writes all data from the reader into this writer until one of the three conditions is met:
+    /// 1. The writer has no available space.
+    /// 2. The reader has no remaining data.
+    /// 3. The writing encounters a page fault that cannot be handled.
+    ///
+    /// Returns the number of bytes written.
+    ///
+    /// It pulls the number of bytes data from the reader and
+    /// fills in the writer with the number of bytes.
+    ///
+    /// If the writing stops due to the condition 1 or 2, this method is considered successful
+    /// and returns the number of bytes written.
+    /// If the writing stops due to the condition 3, which means the reader have remaining data
+    /// and the writer also has available space, the writing is considered failed and return `Err`.
+    ///
+    /// The writing instruction is forbidden if the targets of reader and writer
+    /// are both user space.
+    pub fn write_all<R: 'static>(&mut self, reader: &mut VmReader<'_, R>) -> Result<usize> {
+        let copy_len = self.avail().min(reader.remain());
+        if copy_len == 0 {
+            return Ok(0);
+        }
+
+        if TypeId::of::<Target>() == TypeId::of::<UserSpace>()
+            && TypeId::of::<R>() == TypeId::of::<UserSpace>()
+        {
+            // The target of this writer and the input reader are both user space.
+            panic!("copy from user to user is forbidden");
+        } else if TypeId::of::<Target>() == TypeId::of::<UserSpace>()
+            || TypeId::of::<R>() == TypeId::of::<UserSpace>()
+        {
+            // One of the target is user space and the other is kernel space.
+            //
+            // SAFETY:
+            // Meets the same safety requirements as `VmWriter::write`.
+            let copied_len =
+                unsafe { copy_valid_unchecked(&mut reader.cursor, &mut self.cursor, copy_len) };
+            if copied_len < copy_len {
+                Err(Error::PageFault)
+            } else {
+                Ok(copied_len)
+            }
+        } else {
+            // The target of this writer and the input reader are both kernel space.
+            //
+            // SAFETY:
+            // Meets the same safety requirements as `VmWriter::write`.
+            unsafe {
+                Ok(copy_valid_ensured(
+                    &mut reader.cursor,
+                    &mut self.cursor,
+                    copy_len,
+                ))
+            }
+        }
+    }
+
+    /// Writes a value of `Pod` type.
+    ///
+    /// If the length of the `Pod` type exceeds `self.avail()`,
+    /// or the value can not be write completely, this method will return `Err`.
+    pub fn write_val<T: Pod>(&mut self, new_val: &T) -> Result<()> {
+        if self.avail() < core::mem::size_of::<T>() {
+            return Err(Error::PageFault);
+        }
+
+        let mut reader = VmReader::from(new_val.as_bytes());
+        self.write_all(&mut reader)?;
+        Ok(())
+    }
+}
+
 impl<'a> From<&'a mut [u8]> for VmWriter<'a> {
     fn from(slice: &'a mut [u8]) -> Self {
-        // SAFETY: the range of memory is contiguous and is valid during `'a`.
-        unsafe { Self::from_raw_parts_mut(slice.as_mut_ptr(), slice.len()) }
+        // SAFETY: the range of memory is contiguous and is valid during `'a`, and
+        // will not overlap with other `VmWriter` since the slice already has
+        // an mutable reference. The slice will not be mapped to the user space hence
+        // it will also not overlap with `VmWriter` generated from user space.
+        unsafe { Self::from_kernel_space(slice.as_mut_ptr(), slice.len()) }
     }
 }

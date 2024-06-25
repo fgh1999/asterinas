@@ -14,7 +14,7 @@ pub(crate) use alloc::{
 pub(crate) use core::{any::Any, ffi::CStr, fmt::Debug};
 
 pub(crate) use aster_frame::{
-    mm::{Vaddr, PAGE_SIZE},
+    mm::{Vaddr, VmReader, VmWriter, PAGE_SIZE},
     sync::{Mutex, MutexGuard, RwLock, RwMutex, SpinLock, SpinLockGuard},
 };
 pub(crate) use bitflags::bitflags;
