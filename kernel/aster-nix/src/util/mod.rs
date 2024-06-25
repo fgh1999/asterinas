@@ -2,7 +2,7 @@
 
 use core::mem;
 
-use aster_frame::mm::VmIo;
+use aster_frame::mm::{VmIo, VmReader, VmSpace, VmWriter};
 use aster_rights::Full;
 
 use crate::{prelude::*, vm::vmar::Vmar};
@@ -12,38 +12,45 @@ pub mod random;
 
 pub use iovec::{copy_iovs_from_user, IoVec};
 
-/// Read bytes into the `dest` buffer
+/// Reads bytes into the `dest` `VmWriter`
 /// from the user space of the current process.
-/// If successful,
-/// the `dest` buffer is filled with exact `dest.len` bytes.
-pub fn read_bytes_from_user(src: Vaddr, dest: &mut [u8]) -> Result<()> {
-    let current = current!();
-    let root_vmar = current.root_vmar();
-    Ok(root_vmar.read_bytes(src, dest)?)
+///
+/// If the reading is completely successful, returns `Ok`.
+/// Otherwise, returns `Err`.
+///
+/// TODO: this API can be discarded and replaced with the API of `VmReader`
+/// after replacing all related `buf` usages.
+pub fn read_bytes_from_user(src: Vaddr, dest: &mut VmWriter<'_>) -> Result<()> {
+    let copy_len = dest.avail();
+    let mut reader = VmSpace::current_reader(src, copy_len)?;
+    dest.write_all(&mut reader)?;
+    Ok(())
 }
 
-/// Read a value of `Pod` type
+/// Reads a value of `Pod` type
 /// from the user space of the current process.
 pub fn read_val_from_user<T: Pod>(src: Vaddr) -> Result<T> {
-    let current = current!();
-    let root_vmar = current.root_vmar();
-    Ok(root_vmar.read_val(src)?)
+    Ok(VmSpace::current_reader(src, core::mem::size_of::<T>())?.read_val()?)
 }
 
-/// Write bytes from the `src` buffer
-/// to the user space of the current process. If successful,
-/// the write length will be equal to `src.len`.
-pub fn write_bytes_to_user(dest: Vaddr, src: &[u8]) -> Result<()> {
-    let current = current!();
-    let root_vmar = current.root_vmar();
-    Ok(root_vmar.write_bytes(dest, src)?)
+/// Writes bytes from the `src` `VmReader`
+/// to the user space of the current process.
+///
+/// If the writing is completely successful, returns `Ok`,
+/// Otherwise, returns `Err`.
+///
+/// TODO: this API can be discarded and replaced with the API of `VmWriter`
+/// after replacing all related `buf` usages.
+pub fn write_bytes_to_user(dest: Vaddr, src: &mut VmReader<'_>) -> Result<()> {
+    let copy_len = src.remain();
+    let mut writer = VmSpace::current_writer(dest, copy_len)?;
+    src.read_all(&mut writer)?;
+    Ok(())
 }
 
-/// Write `val` to the user space of the current process.
+/// Writes `val` to the user space of the current process.
 pub fn write_val_to_user<T: Pod>(dest: Vaddr, val: &T) -> Result<()> {
-    let current = current!();
-    let root_vmar = current.root_vmar();
-    Ok(root_vmar.write_val(dest, val)?)
+    Ok(VmSpace::current_writer(dest, core::mem::size_of::<T>())?.write_val(val)?)
 }
 
 /// Read a C string from the user space of the current process.

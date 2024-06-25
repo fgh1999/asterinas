@@ -2,39 +2,49 @@
 
 use core::ops::Range;
 
+use spin::Once;
+
 use super::{
+    io::UserSpace,
     is_page_aligned,
     kspace::KERNEL_PAGE_TABLE,
     page_table::{PageTable, PageTableMode, UserMode},
     CachePolicy, FrameVec, PageFlags, PageProperty, PagingConstsTrait, PrivilegedPageFlags,
-    PAGE_SIZE,
+    VmReader, VmWriter, PAGE_SIZE,
 };
 use crate::{
     arch::mm::{
-        tlb_flush_addr_range, tlb_flush_all_excluding_global, PageTableEntry, PagingConsts,
+        current_page_table_paddr, tlb_flush_addr_range, tlb_flush_all_excluding_global,
+        PageTableEntry, PagingConsts,
     },
+    cpu::CpuExceptionInfo,
     mm::{
         page_table::{Cursor, PageTableQueryResult as PtQr},
         Frame, MAX_USERSPACE_VADDR,
     },
     prelude::*,
+    task::current_task,
     Error,
 };
 
+#[allow(clippy::type_complexity)]
 /// Virtual memory space.
 ///
 /// A virtual memory space (`VmSpace`) can be created and assigned to a user space so that
 /// the virtual memory of the user space can be manipulated safely. For example,
 /// given an arbitrary user-space pointer, one can read and write the memory
-/// location refered to by the user-space pointer without the risk of breaking the
+/// location referred to by the user-space pointer without the risk of breaking the
 /// memory safety of the kernel space.
 ///
 /// A newly-created `VmSpace` is not backed by any physical memory pages.
 /// To provide memory pages for a `VmSpace`, one can allocate and map
 /// physical memory ([`Frame`]s) to the `VmSpace`.
-#[derive(Debug)]
+///
+/// A `VmSpace` can also attach a page fault handler, which will be invoked to handle
+/// page faults generated from user space.
 pub struct VmSpace {
     pt: PageTable<UserMode>,
+    page_fault_handler: Once<fn(&VmSpace, &CpuExceptionInfo) -> core::result::Result<(), ()>>,
 }
 
 // Notes on TLB flushing:
@@ -51,12 +61,34 @@ impl VmSpace {
     pub fn new() -> Self {
         Self {
             pt: KERNEL_PAGE_TABLE.get().unwrap().create_user_page_table(),
+            page_fault_handler: Once::new(),
         }
     }
 
     /// Activates the page table.
     pub(crate) fn activate(&self) {
         self.pt.activate();
+    }
+
+    pub(crate) fn handle_page_fault(
+        &self,
+        info: &CpuExceptionInfo,
+    ) -> core::result::Result<(), ()> {
+        if let Some(func) = self.page_fault_handler.get() {
+            return func(self, info);
+        }
+        Err(())
+    }
+
+    /// Inits the page fault handler in this `VmSpace`.
+    ///
+    /// The page fault handler of a `VmSpace` can only be initialized once.
+    /// If it has been initialized before, calling this method will have no effect.
+    pub fn init_page_fault_handler(
+        &self,
+        func: fn(&VmSpace, &CpuExceptionInfo) -> core::result::Result<(), ()>,
+    ) {
+        self.page_fault_handler.call_once(|| func);
     }
 
     /// Maps some physical memory pages into the VM space according to the given
@@ -116,7 +148,7 @@ impl VmSpace {
     }
 
     /// Queries about a range of virtual memory.
-    /// You will get a iterator of `VmQueryResult` which contains the information of
+    /// You will get an iterator of `VmQueryResult` which contains the information of
     /// each parts of the range.
     pub fn query_range(&self, range: &Range<Vaddr>) -> Result<VmQueryIter> {
         Ok(VmQueryIter {
@@ -202,11 +234,56 @@ impl VmSpace {
     /// read-only. And both the VM space will take handles to the same
     /// physical memory pages.
     pub fn fork_copy_on_write(&self) -> Self {
+        let page_fault_handler = Once::new();
+        if let Some(handler) = self.page_fault_handler.get() {
+            page_fault_handler.call_once(|| *handler);
+        }
         let new_space = Self {
             pt: self.pt.fork_copy_on_write(),
+            page_fault_handler,
         };
         tlb_flush_all_excluding_global();
         new_space
+    }
+
+    /// Returns a reader to read data from the user space of the current task.
+    pub fn current_reader(vaddr: Vaddr, len: usize) -> Result<VmReader<'static, UserSpace>> {
+        let current_task = current_task().ok_or(Error::AccessDenied)?;
+        let user_space = current_task.user_space().ok_or(Error::AccessDenied)?;
+        debug_assert_eq!(current_page_table_paddr(), unsafe {
+            user_space.vm_space().pt.root_paddr()
+        });
+
+        if vaddr.checked_add(len).unwrap_or(usize::MAX) > MAX_USERSPACE_VADDR {
+            return Err(Error::AccessDenied);
+        }
+
+        // SAFETY: As long as the current task owns user space, the page table of
+        // the current task will be activated during the execution of the current task.
+        // Since `VmReader` is neither `Sync` nor `Send`, it will not persist after
+        // the current task exits. Hence, it is ensured that the correct page table
+        // is activated during the usage period of the `VmReader`.
+        Ok(unsafe { VmReader::<UserSpace>::from_user_space(vaddr as *const u8, len) })
+    }
+
+    /// Returns a writer to write data into the user space of the current task.
+    pub fn current_writer(vaddr: Vaddr, len: usize) -> Result<VmWriter<'static, UserSpace>> {
+        let current_task = current_task().ok_or(Error::AccessDenied)?;
+        let user_space = current_task.user_space().ok_or(Error::AccessDenied)?;
+        debug_assert_eq!(current_page_table_paddr(), unsafe {
+            user_space.vm_space().pt.root_paddr()
+        });
+
+        if vaddr.checked_add(len).unwrap_or(usize::MAX) > MAX_USERSPACE_VADDR {
+            return Err(Error::AccessDenied);
+        }
+
+        // SAFETY: As long as the current task owns user space, the page table of
+        // the current task will be activated during the execution of the current task.
+        // Since `VmWriter` is neither `Sync` nor `Send`, it will not persist after
+        // the current task exits. Hence, it is ensured that the correct page table
+        // is activated during the usage period of the `VmWriter`.
+        Ok(unsafe { VmWriter::<UserSpace>::from_user_space(vaddr as *mut u8, len) })
     }
 }
 
