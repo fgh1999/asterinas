@@ -23,7 +23,7 @@ pub fn sys_pread64(fd: FileDesc, buf_ptr: Vaddr, count: usize, pos: i64) -> Resu
     let read_len = {
         let mut buffer = vec![0u8; count];
         let read_len = file.read(&mut buffer)?;
-        write_bytes_to_user(buf_ptr, &buffer)?;
+        write_bytes_to_user(buf_ptr, &mut VmReader::from(buffer.as_slice()))?;
         read_len
     };
 

@@ -36,7 +36,7 @@ pub fn sys_getdents64(fd: FileDesc, buf_addr: Vaddr, buf_len: usize) -> Result<S
     let mut reader = DirentBufferReader::<Dirent64>::new(&mut buffer);
     let _ = inode_handle.readdir(&mut reader)?;
     let read_len = reader.read_len();
-    write_bytes_to_user(buf_addr, &buffer[..read_len])?;
+    write_bytes_to_user(buf_addr, &mut VmReader::from(&buffer[..read_len]))?;
     Ok(SyscallReturn::Return(read_len as _))
 }
 
