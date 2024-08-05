@@ -9,7 +9,6 @@ use crate::{fs::file_handle::FileLike, prelude::*, util::IoVec};
 
 pub mod ip;
 pub mod options;
-pub mod unix;
 mod util;
 pub mod vsock;
 

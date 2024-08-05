@@ -3,7 +3,6 @@
 use crate::{
     net::socket::{
         ip::{Ipv4Address, PortNum},
-        unix::UnixSocketAddr,
         vsock::addr::VsockSocketAddr,
     },
     prelude::*,
@@ -11,7 +10,7 @@ use crate::{
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SocketAddr {
-    Unix(UnixSocketAddr),
+    Unix,
     IPv4(Ipv4Address, PortNum),
     Vsock(VsockSocketAddr),
 }
