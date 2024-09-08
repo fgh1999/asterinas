@@ -8,7 +8,10 @@ use self::{bound::BoundDatagram, unbound::UnboundDatagram};
 use super::{common::get_ephemeral_endpoint, IpEndpoint, UNSPECIFIED_LOCAL_ENDPOINT};
 use crate::{
     events::{IoEvents, Observer},
-    fs::{file_handle::FileLike, utils::StatusFlags},
+    fs::{
+        file_handle::{FileLike, FileType},
+        utils::StatusFlags,
+    },
     net::{
         poll_ifaces,
         socket::{
@@ -242,6 +245,10 @@ impl FileLike for DatagramSocket {
         observer: &Weak<dyn Observer<IoEvents>>,
     ) -> Option<Weak<dyn Observer<IoEvents>>> {
         self.pollee.unregister_observer(observer)
+    }
+
+    fn file_type(&self) -> FileType {
+        FileType::SocketDgram
     }
 }
 

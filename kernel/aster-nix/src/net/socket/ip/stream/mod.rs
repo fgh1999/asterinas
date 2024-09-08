@@ -14,7 +14,10 @@ use util::{TcpOptionSet, DEFAULT_MAXSEG};
 use super::UNSPECIFIED_LOCAL_ENDPOINT;
 use crate::{
     events::{IoEvents, Observer},
-    fs::{file_handle::FileLike, utils::StatusFlags},
+    fs::{
+        file_handle::{FileLike, FileType},
+        utils::StatusFlags,
+    },
     match_sock_option_mut, match_sock_option_ref,
     net::{
         poll_ifaces,
@@ -392,6 +395,10 @@ impl FileLike for StreamSocket {
         observer: &Weak<dyn Observer<IoEvents>>,
     ) -> Option<Weak<dyn Observer<IoEvents>>> {
         self.pollee.unregister_observer(observer)
+    }
+
+    fn file_type(&self) -> FileType {
+        FileType::SocketStream
     }
 }
 
