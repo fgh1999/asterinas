@@ -41,12 +41,14 @@ spin = "0.9.4"
 static_assertions = "1.1.0"
 tdx-guest = { version = "0.1.5", optional = true }
 trapframe = "0.10.0"
-unwinding = { version = "0.2.2", default-features = false, features = ["fde-gnu-eh-frame-hdr", "hide-trace", "panic", "personality", "unwinder"] }
+#unwinding = { version = "0.2.2", default-features = false, features = ["fde-gnu-eh-frame-hdr", "hide-trace", "panic", "personality", "unwinder"] }
+unwinding = { version = "=0.2.3", default-features = false, features = ["fde-gnu-eh-frame-hdr", "hide-trace", "panic", "personality", "unwinder"] }
 volatile = { version = "0.4.5", features = ["unstable"] }
 xarray = { git = "https://github.com/asterinas/xarray", rev = "72a4067", version = "0.1.0" }
 
 [target.x86_64-unknown-none.dependencies]
-x86_64 = "0.14.2"
+#x86_64 = "0.14.13"
+x86_64 = "=0.14.11"
 x86 = "0.52.0"
 acpi = "4.1.1"
 aml = "0.16.3"

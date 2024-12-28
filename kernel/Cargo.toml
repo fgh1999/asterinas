@@ -10,7 +10,7 @@ aster-nix = { path = "aster-nix" }
 component = { path = "libs/comp-sys/component" }
 
 [dev-dependencies]
-x86_64 = "0.14.2"
+x86_64 = "=0.14.11"
 aster-time = { path = "comps/time" }
 aster-framebuffer = { path = "comps/framebuffer" }
 
