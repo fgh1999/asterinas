@@ -11,8 +11,8 @@ use super::{common::get_ephemeral_endpoint, UNSPECIFIED_LOCAL_ENDPOINT};
 use crate::{
     events::IoEvents,
     fs::{
-        file_handle::FileLike,
-        utils::{InodeMode, Metadata, StatusFlags},
+        file_handle::{FileLike, FileType},
+        utils::StatusFlags,
     },
     match_sock_option_mut,
     net::socket::{
@@ -264,14 +264,8 @@ impl FileLike for DatagramSocket {
         Ok(())
     }
 
-    fn metadata(&self) -> Metadata {
-        // This is a dummy implementation.
-        // TODO: Add "SockFS" and link `DatagramSocket` to it.
-        Metadata::new_socket(
-            0,
-            InodeMode::from_bits_truncate(0o140777),
-            aster_block::BLOCK_SIZE,
-        )
+    fn file_type(&self) -> FileType {
+        FileType::SocketDgram
     }
 }
 

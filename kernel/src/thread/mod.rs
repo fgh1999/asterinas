@@ -22,8 +22,8 @@ pub mod exception;
 pub mod kernel_thread;
 pub mod oops;
 pub mod status;
-pub mod task;
-pub mod work_queue;
+// pub mod task;
+// pub mod work_queue;
 
 pub type Tid = u32;
 

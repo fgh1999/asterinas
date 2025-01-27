@@ -199,20 +199,20 @@ impl Pause for WaitQueue {
     }
 }
 
-/// Executes a closure while temporarily blocking some signals for the current POSIX thread.
-pub fn with_signal_blocked<R>(ctx: &Context, mask: SigMask, operate: impl FnOnce() -> R) -> R {
-    let posix_thread = ctx.posix_thread;
-    let sig_mask = posix_thread.sig_mask();
+// /// Executes a closure while temporarily blocking some signals for the current POSIX thread.
+// pub fn with_signal_blocked<R>(ctx: &Context, mask: SigMask, operate: impl FnOnce() -> R) -> R {
+//     let posix_thread = ctx.posix_thread;
+//     let sig_mask = posix_thread.sig_mask();
 
-    let old_mask = sig_mask.load(Ordering::Relaxed);
-    sig_mask.store(old_mask + mask, Ordering::Relaxed);
+//     let old_mask = sig_mask.load(Ordering::Relaxed);
+//     sig_mask.store(old_mask + mask, Ordering::Relaxed);
 
-    let res = operate();
+//     let res = operate();
 
-    sig_mask.store(old_mask, Ordering::Relaxed);
+//     sig_mask.store(old_mask, Ordering::Relaxed);
 
-    res
-}
+//     res
+// }
 
 #[cfg(ktest)]
 mod test {

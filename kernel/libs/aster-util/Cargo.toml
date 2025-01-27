@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-ostd = { path = "../../../ostd" }
+ostd = { workspace = true }
 typeflags-util = { path = "../typeflags-util" }
 aster-rights-proc = { path = "../aster-rights-proc" }
 aster-rights = { path = "../aster-rights" }

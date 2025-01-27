@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 bitflags = "1.3"
 jhash = { path = "../jhash" }
-ostd = { path = "../../../ostd" }
+ostd = { workspace = true }
 smoltcp = { git = "https://github.com/asterinas/smoltcp", tag = "r_2024-11-08_f07e5b5", default-features = false, features = [
     "alloc",
     "log",

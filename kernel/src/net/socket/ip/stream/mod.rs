@@ -19,8 +19,8 @@ use super::UNSPECIFIED_LOCAL_ENDPOINT;
 use crate::{
     events::IoEvents,
     fs::{
-        file_handle::FileLike,
-        utils::{InodeMode, Metadata, StatusFlags},
+        file_handle::{FileLike, FileType},
+        utils::StatusFlags,
     },
     match_sock_option_mut, match_sock_option_ref,
     net::{
@@ -457,14 +457,8 @@ impl FileLike for StreamSocket {
         Some(self)
     }
 
-    fn metadata(&self) -> Metadata {
-        // This is a dummy implementation.
-        // TODO: Add "SockFS" and link `StreamSocket` to it.
-        Metadata::new_socket(
-            0,
-            InodeMode::from_bits_truncate(0o140777),
-            aster_block::BLOCK_SIZE,
-        )
+    fn file_type(&self) -> FileType {
+        FileType::SocketStream
     }
 }
 
